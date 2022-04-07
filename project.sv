@@ -1,6 +1,8 @@
 // project.sv - top-level module for ELEX 7660 project
 // this module is designed to interface with the De0-Nano-Soc
-// this module works in conjunction with decode7, kpdecode, colseq, and decodeSPKR
+// this module works in conjunction with decode7, kpdecode, colseq, decodeSPKR,decodeScore,StartSM
+
+parameter SEED_BITS = 16;
 
 module project ( output logic [3:0] kpc,  // column select, active-low
               (* altera_attribute = "-name WEAK_PULL_UP_RESISTOR ON" *)
@@ -12,9 +14,14 @@ module project ( output logic [3:0] kpc,  // column select, active-low
 
    logic clk ;                  		// 2kHz clock for keypad scanning
    logic kphit ;                  	// a key is pressed
+	logic strt;
    logic [3:0] num ;          	   // value of pressed key
 	logic [31:0] desiredFrequency; 	// desired note frequency (e.g C = 261Hz, A = 440Hz etc.)
 	// logic [31:0] score;
+	
+	reg [(SEED_BITS-1):0]out = 0;
+	reg rst = 0;
+	reg [(SEED_BITS-1):0]seed = 8'b0101_0101;
 	
 	
    assign ct = { {3{1'b0}}, kphit } ;
@@ -27,16 +34,119 @@ module project ( output logic [3:0] kpc,  // column select, active-low
 	decode7 decode7_0 (.*);
 	decodeSPKR decodeSPKR_0 (.*);
 	MusicBox MusicBox_0 (.*);
+	StartSM StartSM_0 (.*);
 	//decodeScore decodeScore_0 (.*) ;
 	
 	
 	// **** SIMON SAYS ****
-	always_ff @(posedge clk)
-		digit <= digit + 1'b1;
+always_ff @(posedge clk) 
+	digit <= digit + 1'b1;
 		
-		always_ff @(posedge FPGA_CLK1_50) begin
-			write 
+always_ff @(posedge FPGA_CLK1_50) begin
+		
+	rst <= 0;
+	lfsrclk <= 0;
+	state <= statenext;
+
+	case (state)
+		
+	start: begin
+		seed <= seed + 1;
+		count <= count + 1;
+		if (count > 50*1000*1000 ) begin
+			count <= 0;
+		if((LAMPS >= (1 << 3)) || (LAMPS == 0))
+			LAMPS <= 1;
+		else
+			LAMPS <= LAMPS << 1;
+		end
+	end // end case start:
 	
+	init: begin
+		write <= 1;
+		rst <= 1;
+		lfsrclk <= 1;
+		count = 0;
+	end // end begin
+	
+	display: begin
+		count <= count + 1;
+		if(count < 10 * 1000 * 1000) begin
+			LAMPS <= '0;
+			write <= 1;
+			case(out % (NUM_LAMPS))
+				0: speakerfreq <= NOTE_C;
+				1: speakerfreq <= NOTE_D;
+				2: speakerfreq <= NOTE_E;
+				3: speakerfreq <= NOTE_F;
+			endcase // endcase
+		end // end if
+		else begin
+		LAMPS <= (1 << (out % (NUM_LAMPS)));
+		end // end else
+		if (count > 35 * 1000 * 1000 ) begin
+			lfsrclk <= 1;
+			count <= 0;
+			lcount <= lcount + 1;
+		end
+	end // end display
+	
+	preparepoll: begin
+		rst <= 1; // reset the LFSR
+		write <= 1;
+		speakerfreq <= 0;
+	end
+	
+	poll: begin
+		if ((lcount > 0) && PBUP) begin
+			lcount <= lcount -1;
+			case(out % (NUM_LAMPS))
+				0: loser <= !PBY_up;
+				1: loser <= !PBR_up;
+				2: loser <= !PBB_up;
+				3: loser <= !PBG_up;
+			endcase // out % NUMLAMPS
+			lfsrclk <= 1;
+		end // end if(lcount > 0) %% PBUP
+	end // end poll
+	
+	polltodisplay: begin
+	scount <= scount + 1; // next level!
+	rst <= 1; // reseed lfsr
+	count <= 0; // reset timer
+	end // endpolltodisplay
+
+	finish: begin
+		scount <= 0;
+		loser <= 0;
+		LAMPS <= '1;
+		end
+		
+	endcase
+	
+end
+	
+	always_comb begin
+		PBPRESS = PBY_state || PBR_state || PBB_state || PBG_state;
+		PBDOWN = PBY_down || PBR_down || PBB_down || PBG_down;
+		PBUP = PBY_up || PBR_up || PBB_up || PBG_up;
+		if ((state == start) && (PBY_state || PBR_state || PBB_state || PBG_state) )
+			statenext = init;
+		else if (state == init)
+			statenext = display;
+		else if ((state == display) && (lcount > (scount)))
+			statenext = preparepoll;
+		else if (state == preparepoll)
+			statenext = poll;
+		else if ((state == poll) && (loser || (lcount < 1)))
+			statenext = loser ? finish : polltodisplay;
+		else if (state == polltodisplay)
+			statenext = display;
+		else if ((state == finish) && (finishcount < 50 * 1000 * 1000 * 10))
+			statenext = start;
+		else
+			statenext = state;
+end
    
 endmodule
 
